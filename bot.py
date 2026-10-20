@@ -25,10 +25,7 @@ bot = telebot.TeleBot(TOKEN, parse_mode=None)
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# نخزن الرابط منفصلًا عن callback_data لتجنب تجاوز حد تيليجرام
 user_jobs = {}
-
-# حد حجم الملفات لتيليجرام (49 ميجابايت لتف تجاوز 50MB)
 MAX_FILE_SIZE = 49 * 1024 * 1024
 
 
@@ -52,8 +49,8 @@ def get_video_info(url):
         "skip_download": True,
         "extractor_retries": 3,
         "socket_timeout": 30,
-        # هذا التعديل البسيط يتجاوز مشكلة "أثبت أنك لست روبوت" تلقائياً
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+        # استخدام عميل TV و Safari لتخطي حظر الروبوتات
+        "extractor_args": {"youtube": {"player_client": ["tv", "web_safari"]}},
     }
 
     with yt_dlp.YoutubeDL(options) as ydl:
@@ -75,9 +72,7 @@ def get_quality_keyboard(url, info):
         if height and height >= 144:
             available_heights.add(height)
 
-    # حفظ الرابط في الذاكرة
     user_jobs[job_id] = url
-
     heights = sorted(available_heights, reverse=True)
 
     for height in heights:
@@ -107,10 +102,7 @@ def start(message):
     bot.reply_to(
         message,
         "👋 أهلًا بك في بوت تحميل الفيديو والصوت!\n\n"
-        "أرسل رابط فيديو من YouTube أو TikTok أو Facebook.\n"
-        "ستظهر لك خيارات الجودة والصوت إذا كان الموقع يدعم ذلك.\n\n"
-        "⚠️ قد لا تعمل بعض الروابط إذا تطلب الموقع تسجيل الدخول "
-        "أو منع الوصول من الخادم."
+        "أرسل رابط فيديو من YouTube أو TikTok أو Facebook."
     )
 
 
@@ -143,7 +135,7 @@ def handle_url(message):
         logging.exception("تعذر فحص الرابط")
         bot.edit_message_text(
             "❌ لم أستطع قراءة الرابط.\n\n"
-            "قد يكون الرابط خاصًا أو غير مدعوم أو يتطلب تسجيل الدخول.\n"
+            "قد يكون الرابط محظورًا من الاستضافة.\n"
             "التفاصيل: " + str(exc)[:700],
             chat_id=message.chat.id,
             message_id=status.message_id
@@ -164,16 +156,13 @@ def download_media(url, mode, height=None):
         "retries": 3,
         "fragment_retries": 3,
         "socket_timeout": 30,
-        # لتجاوز الحظر أثناء التنزيل أيضاً
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+        "extractor_args": {"youtube": {"player_client": ["tv", "web_safari"]}},
     }
 
     if mode == "mp3":
         if not find_ffmpeg():
             shutil.rmtree(job_dir, ignore_errors=True)
-            raise RuntimeError(
-                "FFmpeg غير مثبت على الاستضافة، لذلك لا يمكن تحويل الصوت إلى MP3."
-            )
+            raise RuntimeError("FFmpeg غير مثبت على الاستضافة.")
 
         options.update({
             "format": "bestaudio/best",
@@ -207,10 +196,6 @@ def download_media(url, mode, height=None):
             if os.path.isfile(os.path.join(job_dir, name))
         ]
 
-        if not files:
-            raise RuntimeError("لم يتم العثور على الملف بعد التحميل.")
-
-        # استبعاد الملفات المؤقتة
         files = [
             path for path in files
             if not path.endswith((".part", ".ytdl"))
@@ -262,7 +247,7 @@ def handle_choice(call):
         if size > MAX_FILE_SIZE:
             bot.send_message(
                 call.message.chat.id,
-                f"⚠️ حجم الملف ({size / (1024 * 1024):.1f} ميجابايت) يتجاوز الحد المسموح للإرسال عبر البوت (50 ميجابايت)."
+                f"⚠️ حجم الملف ({size / (1024 * 1024):.1f} ميجابايت) يتجاوز الحد المسموح."
             )
             return
 
@@ -287,23 +272,15 @@ def handle_choice(call):
         logging.exception("فشل التحميل أو الإرسال")
         bot.send_message(
             call.message.chat.id,
-            "❌ فشل التحميل أو الإرسال.\n\n"
-            "قد يكون السبب منع الموقع للتنزيل أو عدم دعم الرابط "
-            "أو عدم توفر FFmpeg أو تجاوز حجم الملف.\n\n"
-            f"التفاصيل: {str(exc)[:700]}"
+            f"❌ فشل التحميل.\nالتفاصيل: {str(exc)[:700]}"
         )
 
     finally:
-        # حذف رسالة التنزيل المعلقة
         try:
-            bot.delete_message(
-                call.message.chat.id,
-                status.message_id
-            )
+            bot.delete_message(call.message.chat.id, status.message_id)
         except Exception:
             pass
 
-        # تنظيف المجلد والذاكرة
         if job_dir:
             shutil.rmtree(job_dir, ignore_errors=True)
 
@@ -312,8 +289,4 @@ def handle_choice(call):
 
 if __name__ == "__main__":
     logging.info("البوت يعمل الآن...")
-    bot.infinity_polling(
-        skip_pending=True,
-        timeout=30,
-        long_polling_timeout=30
-    )
+    bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
