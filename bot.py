@@ -18,7 +18,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 
 if not TOKEN:
     raise RuntimeError(
-        "يرجى تعيين متغير البيئة BOT_TOKEN برمز البوت الجديد."
+        "8726449470:AAHuKzKNgk5wbwV1ki6AQnfpeHMSJ2T78fo"
     )
 
 bot = telebot.TeleBot(TOKEN, threaded=True)
