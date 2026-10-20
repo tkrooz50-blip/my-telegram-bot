@@ -49,7 +49,6 @@ def get_video_info(url):
         "skip_download": True,
         "extractor_retries": 3,
         "socket_timeout": 30,
-        # استخدام عميل TV و Safari لتخطي حظر الروبوتات
         "extractor_args": {"youtube": {"player_client": ["tv", "web_safari"]}},
     }
 
@@ -102,7 +101,7 @@ def start(message):
     bot.reply_to(
         message,
         "👋 أهلًا بك في بوت تحميل الفيديو والصوت!\n\n"
-        "أرسل رابط فيديو من YouTube أو TikTok أو Facebook."
+        "أرسل رابط فيديو من تيك توك أو فيسبوك."
     )
 
 
@@ -133,10 +132,10 @@ def handle_url(message):
 
     except Exception as exc:
         logging.exception("تعذر فحص الرابط")
+        # تم تعديل رسالة الخطأ هنا لتكون مختصرة وخالية من الروابط التقنية
         bot.edit_message_text(
-            "❌ لم أستطع قراءة الرابط.\n\n"
-            "قد يكون الرابط محظورًا من الاستضافة.\n"
-            "التفاصيل: " + str(exc)[:700],
+            "❌ عذراً، لم أستطع قراءة هذا الرابط.\n\n"
+            "قد يكون الرابط خاصاً، محذوفاً، أو أن المنصة تحظر الوصول إليه مؤقتاً.",
             chat_id=message.chat.id,
             message_id=status.message_id
         )
@@ -247,7 +246,7 @@ def handle_choice(call):
         if size > MAX_FILE_SIZE:
             bot.send_message(
                 call.message.chat.id,
-                f"⚠️ حجم الملف ({size / (1024 * 1024):.1f} ميجابايت) يتجاوز الحد المسموح."
+                f"⚠️ حجم الملف ({size / (1024 * 1024):.1f} ميجابايت) يتجاوز الحد المسموح للإرسال."
             )
             return
 
@@ -272,7 +271,7 @@ def handle_choice(call):
         logging.exception("فشل التحميل أو الإرسال")
         bot.send_message(
             call.message.chat.id,
-            f"❌ فشل التحميل.\nالتفاصيل: {str(exc)[:700]}"
+            "❌ عذراً، فشل تحميل أو إرسال الملف. حاول مرة أخرى لاحقاً."
         )
 
     finally:
