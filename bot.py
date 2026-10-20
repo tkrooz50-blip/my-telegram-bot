@@ -28,7 +28,7 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 # نخزن الرابط منفصلًا عن callback_data لتجنب تجاوز حد تيليجرام
 user_jobs = {}
 
-# حد حجم الملفات لتيليجرام (49 ميجابايت لتفادي تجاوز 50MB)
+# حد حجم الملفات لتيليجرام (49 ميجابايت لتف تجاوز 50MB)
 MAX_FILE_SIZE = 49 * 1024 * 1024
 
 
@@ -50,8 +50,10 @@ def get_video_info(url):
         "no_warnings": True,
         "noplaylist": True,
         "skip_download": True,
-        "extractor_retries": 2,
-        "socket_timeout": 20,
+        "extractor_retries": 3,
+        "socket_timeout": 30,
+        # هذا التعديل البسيط يتجاوز مشكلة "أثبت أنك لست روبوت" تلقائياً
+        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
     }
 
     with yt_dlp.YoutubeDL(options) as ydl:
@@ -159,9 +161,11 @@ def download_media(url, mode, height=None):
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
-        "retries": 2,
-        "fragment_retries": 2,
+        "retries": 3,
+        "fragment_retries": 3,
         "socket_timeout": 30,
+        # لتجاوز الحظر أثناء التنزيل أيضاً
+        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
     }
 
     if mode == "mp3":
