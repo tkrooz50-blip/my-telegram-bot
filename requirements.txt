@@ -13,5 +13,3 @@ requests==2.34.2
 urllib3==2.8.0
 yarl==1.25.1
 yt-dlp==2026.8.19
-pyTelegramBotAPI
-yt-dlp
