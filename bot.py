@@ -2,501 +2,314 @@ import os
 import re
 import uuid
 import shutil
-import tempfile
-import threading
-
+import logging
+import subprocess
 import telebot
 import yt_dlp
 
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ==================================================
-# الإعدادات
-# ==================================================
+# ضع رمز البوت الجديد هنا
+TOKEN = "8726449470:AAHuKzKNgk5wbwV1ki6AQnfpeHMSJ2T78fo"
 
-TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN or TOKEN == "8726449470:AAHuKzKNgk5wbwV1ki6AQnfpeHMSJ2T78fo":
+    raise RuntimeError("8726449470:AAHuKzKNgk5wbwV1ki6AQnfpeHMSJ2T78fo")
 
-if not TOKEN:
-    raise RuntimeError(
-        "8726449470:AAHuKzKNgk5wbwV1ki6AQnfpeHMSJ2T78fo"
-    )
+bot = telebot.TeleBot(TOKEN, parse_mode=None)
 
-bot = telebot.TeleBot(TOKEN, threaded=True)
+DOWNLOAD_DIR = "downloads"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# الحد الأقصى التقريبي للإرسال عبر Telegram Bot API.
-# يمكن تعديله حسب حدود Telegram وطريقة الاستضافة.
-MAX_FILE_SIZE = 49 * 1024 * 1024
-
-SUPPORTED_DOMAINS = (
-    "youtube.com",
-    "youtu.be",
-    "tiktok.com",
-    "facebook.com",
-    "fb.watch",
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# نخزن روابط المستخدمين مؤقتًا باستخدام معرف فريد.
-pending_downloads = {}
+# نخزن الرابط منفصلًا عن callback_data لتجنب تجاوز حد تيليجرام
+user_jobs = {}
 
-# منع تكرار تنزيل الطلب نفسه أثناء معالجته.
-active_downloads = set()
-
-downloads_lock = threading.Lock()
+MAX_FILE_SIZE = 49 * 1024 * 1024
 
 
-# ==================================================
-# أدوات مساعدة
-# ==================================================
-
-def is_supported_url(text):
-    """التحقق الأولي من رابط المنصة."""
-
-    if not text:
-        return False
-
-    text = text.strip()
-
+def valid_url(url):
     pattern = re.compile(
-        r"^https?://[^\s]+$",
+        r"^https?://",
         re.IGNORECASE
     )
-
-    if not pattern.match(text):
-        return False
-
-    domain_match = re.search(
-        r"https?://([^/:?#]+)",
-        text,
-        re.IGNORECASE
-    )
-
-    if not domain_match:
-        return False
-
-    hostname = domain_match.group(1).lower()
-
-    return any(
-        hostname == domain or hostname.endswith("." + domain)
-        for domain in SUPPORTED_DOMAINS
-    )
+    return bool(pattern.match(url))
 
 
-def create_keyboard(url, platform, formats=None):
-    """إنشاء قائمة الخيارات المناسبة للرابط."""
-
-    keyboard = InlineKeyboardMarkup(row_width=2)
-
-    if platform == "youtube":
-        keyboard.row(
-            InlineKeyboardButton(
-                "🎬 أفضل جودة متاحة",
-                callback_data=f"video_best|{url}"
-            )
-        )
-
-        # عرض خيارات الجودة بناءً على الصيغ المكتشفة.
-        if formats:
-            for quality in ("1080", "720", "480", "360"):
-                available = any(
-                    f.get("height") == int(quality)
-                    and f.get("vcodec") != "none"
-                    and f.get("acodec") == "none"
-                    for f in formats
-                )
-
-                if available:
-                    keyboard.add(
-                        InlineKeyboardButton(
-                            f"📹 {quality}p",
-                            callback_data=f"video_{quality}|{url}"
-                        )
-                    )
-
-        keyboard.row(
-            InlineKeyboardButton(
-                "🎵 تحميل MP3",
-                callback_data=f"audio|{url}"
-            )
-        )
-
-    else:
-        keyboard.row(
-            InlineKeyboardButton(
-                "📹 تحميل الفيديو",
-                callback_data=f"video_best|{url}"
-            ),
-            InlineKeyboardButton(
-                "🎵 تحميل MP3",
-                callback_data=f"audio|{url}"
-            )
-        )
-
-    return keyboard
+def find_ffmpeg():
+    return shutil.which("ffmpeg")
 
 
-def get_video_options(url):
-    """استخراج بيانات الفيديو والصيغ المتاحة دون تنزيله."""
-
+def get_video_info(url):
     options = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
+        "skip_download": True,
+        "extractor_retries": 2,
         "socket_timeout": 20,
-        "retries": 2,
     }
 
     with yt_dlp.YoutubeDL(options) as ydl:
         return ydl.extract_info(url, download=False)
 
 
-def safe_filename(title, extension):
-    """إنشاء اسم ملف آمن."""
+def get_quality_keyboard(url, info):
+    keyboard = InlineKeyboardMarkup(row_width=2)
+    job_id = uuid.uuid4().hex[:12]
 
-    title = re.sub(r'[\\/*?:"<>|]', "_", title or "media")
-    title = title[:80].strip() or "media"
+    formats = info.get("formats", [])
+    available_heights = set()
 
-    return f"{title}.{extension}"
+    for fmt in formats:
+        if fmt.get("vcodec") in (None, "none"):
+            continue
 
+        height = fmt.get("height")
+        if height and height >= 144:
+            available_heights.add(height)
 
-def download_media(url, mode, quality=None):
-    """
-    تنزيل الفيديو أو الصوت في مجلد مؤقت مستقل.
-    تعيد الدالة مسار الملف وعنوانه والمجلد المؤقت.
-    """
+    # نخزن الرابط في الذاكرة بدلًا من وضعه داخل callback_data
+    user_jobs[job_id] = url
 
-    temp_dir = tempfile.mkdtemp(prefix="telegram_media_")
+    heights = sorted(available_heights, reverse=True)
 
-    try:
-        output_template = os.path.join(
-            temp_dir,
-            "%(title).80s_%(id)s.%(ext)s"
+    for height in heights:
+        keyboard.add(
+            InlineKeyboardButton(
+                f"📹 {height}p",
+                callback_data=f"video:{job_id}:{height}"
+            )
         )
 
-        ydl_opts = {
-            "outtmpl": output_template,
-            "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-            "retries": 3,
-            "socket_timeout": 30,
-        }
+    keyboard.add(
+        InlineKeyboardButton(
+            "🎬 أفضل جودة متاحة",
+            callback_data=f"best:{job_id}"
+        ),
+        InlineKeyboardButton(
+            "🎵 تحميل MP3",
+            callback_data=f"mp3:{job_id}"
+        )
+    )
 
-        if mode == "audio":
-            ydl_opts.update({
-                "format": "bestaudio/best",
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192",
-                }],
-            })
+    return keyboard
 
-        else:
-            if quality:
-                format_selector = (
-                    f"bestvideo[height<={quality}]"
-                    f"+bestaudio/best[height<={quality}]"
-                    f"/best[height<={quality}]"
-                    f"/best"
-                )
-            else:
-                format_selector = "bestvideo+bestaudio/best"
 
-            ydl_opts.update({
-                "format": format_selector,
-                "merge_output_format": "mp4",
-            })
+@bot.message_handler(commands=["start", "help"])
+def start(message):
+    bot.reply_to(
+        message,
+        "👋 أهلًا بك في بوت تحميل الفيديو والصوت!\n\n"
+        "أرسل رابط فيديو من YouTube أو TikTok أو Facebook.\n"
+        "ستظهر لك خيارات الجودة والصوت إذا كان الموقع يدعم ذلك.\n\n"
+        "⚠️ قد لا تعمل بعض الروابط إذا تطلب الموقع تسجيل الدخول "
+        "أو منع الوصول من الخادم."
+    )
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            title = info.get("title", "media")
 
-            files = [
-                os.path.join(temp_dir, filename)
-                for filename in os.listdir(temp_dir)
-                if os.path.isfile(os.path.join(temp_dir, filename))
-            ]
+@bot.message_handler(
+    content_types=["text"],
+    func=lambda message: not message.text.startswith("/")
+)
+def handle_url(message):
+    url = message.text.strip()
 
-            # استبعاد الملفات الجزئية.
-            files = [
-                path for path in files
-                if not path.endswith((".part", ".ytdl"))
-            ]
+    if not valid_url(url):
+        bot.reply_to(message, "❌ أرسل رابطًا يبدأ بـ http:// أو https://")
+        return
 
-            if not files:
-                raise FileNotFoundError(
-                    "لم يتم العثور على الملف بعد انتهاء التنزيل."
-                )
+    status = bot.reply_to(message, "⏳ أفحص الرابط، انتظر قليلًا...")
 
-            # اختيار الملف النهائي الأكبر حجمًا.
-            file_path = max(files, key=os.path.getsize)
+    try:
+        info = get_video_info(url)
+        title = info.get("title", "فيديو")
+        keyboard = get_quality_keyboard(url, info)
 
-            if os.path.getsize(file_path) > MAX_FILE_SIZE:
-                raise ValueError(
-                    "حجم الملف أكبر من الحد المحدد للإرسال. "
-                    "اختر جودة أقل أو ملفًا أصغر."
-                )
+        bot.edit_message_text(
+            f"🎬 {title}\n\nاختر الجودة أو صيغة الصوت:",
+            chat_id=message.chat.id,
+            message_id=status.message_id,
+            reply_markup=keyboard
+        )
 
-            return file_path, title, temp_dir
+    except Exception as exc:
+        logging.exception("تعذر فحص الرابط")
+        bot.edit_message_text(
+            "❌ لم أستطع قراءة الرابط.\n\n"
+            "قد يكون الرابط خاصًا أو غير مدعوم أو يتطلب تسجيل الدخول.\n"
+            "التفاصيل: " + str(exc)[:700],
+            chat_id=message.chat.id,
+            message_id=status.message_id
+        )
+
+
+def download_media(url, mode, height=None):
+    job_dir = os.path.join(DOWNLOAD_DIR, uuid.uuid4().hex)
+    os.makedirs(job_dir, exist_ok=True)
+
+    output_template = os.path.join(job_dir, "%(title).80s_%(id)s.%(ext)s")
+
+    options = {
+        "outtmpl": output_template,
+        "noplaylist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "retries": 2,
+        "fragment_retries": 2,
+        "socket_timeout": 30,
+    }
+
+    if mode == "mp3":
+        if not find_ffmpeg():
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise RuntimeError(
+                "FFmpeg غير مثبت على الاستضافة، لذلك لا يمكن تحويل الصوت إلى MP3."
+            )
+
+        options.update({
+            "format": "bestaudio/best",
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }],
+        })
+
+    elif mode == "best":
+        options["format"] = (
+            "best[ext=mp4]/best"
+        )
+
+    elif mode == "video":
+        options["format"] = (
+            f"best[height<={height}][ext=mp4]/"
+            f"best[height<={height}]/best"
+        )
+
+    else:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise ValueError("صيغة تحميل غير معروفة.")
+
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            ydl.download([url])
+
+        files = [
+            os.path.join(job_dir, name)
+            for name in os.listdir(job_dir)
+            if os.path.isfile(os.path.join(job_dir, name))
+        ]
+
+        if not files:
+            raise RuntimeError("لم يتم العثور على الملف بعد التحميل.")
+
+        # اختر أكبر ملف ناتج، مع استبعاد الملفات المؤقتة
+        files = [
+            path for path in files
+            if not path.endswith((".part", ".ytdl"))
+        ]
+
+        if not files:
+            raise RuntimeError("لم يكتمل تنزيل الملف.")
+
+        result = max(files, key=os.path.getsize)
+        return result, job_dir
 
     except Exception:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        shutil.rmtree(job_dir, ignore_errors=True)
         raise
 
 
-def send_download(chat_id, url, mode, quality=None):
-    """تنزيل الملف وإرساله إلى المستخدم."""
+@bot.callback_query_handler(
+    func=lambda call: call.data.startswith(("video:", "best:", "mp3:"))
+)
+def handle_choice(call):
+    parts = call.data.split(":")
+    mode = parts[0]
+    job_id = parts[1]
 
-    job_key = (chat_id, url, mode, quality)
+    url = user_jobs.get(job_id)
 
-    with downloads_lock:
-        if job_key in active_downloads:
+    if not url:
+        bot.answer_callback_query(
+            call.id,
+            "انتهت صلاحية الرابط. أرسل الرابط من جديد.",
+            show_alert=True
+        )
+        return
+
+    height = int(parts[2]) if mode == "video" and len(parts) > 2 else None
+
+    bot.answer_callback_query(call.id, "بدأ التحميل...")
+    status = bot.send_message(
+        call.message.chat.id,
+        "⏬ جارٍ التحميل، يرجى الانتظار..."
+    )
+
+    job_dir = None
+
+    try:
+        file_path, job_dir = download_media(url, mode, height)
+        size = os.path.getsize(file_path)
+
+        if size > MAX_FILE_SIZE:
             bot.send_message(
-                chat_id,
-                "⏳ هذا الطلب قيد التنفيذ بالفعل."
+                call.message.chat.id,
+                f"⚠️ حجم الملف {size / (1024 * 1024):.1f} ميجابايت، "
+                "وقد يتجاوز حد الإرسال الذي يدعمه البوت."
             )
             return
 
-        active_downloads.add(job_key)
-
-    temp_dir = None
-    status = bot.send_message(
-        chat_id,
-        "⏳ جارٍ تجهيز الملف، يرجى الانتظار..."
-    )
-
-    try:
-        file_path, title, temp_dir = download_media(
-            url,
-            mode,
-            quality
-        )
-
-        bot.edit_message_text(
-            "📤 جارٍ إرسال الملف...",
-            chat_id,
-            status.message_id
-        )
-
-        filename = os.path.basename(file_path)
-
         with open(file_path, "rb") as media:
-            if mode == "audio":
+            if mode == "mp3":
                 bot.send_audio(
-                    chat_id,
+                    call.message.chat.id,
                     media,
-                    title=title,
-                    caption="🎵 تم تحميل الصوت بنجاح."
+                    title=os.path.splitext(os.path.basename(file_path))[0]
                 )
-
             else:
                 bot.send_video(
-                    chat_id,
+                    call.message.chat.id,
                     media,
-                    caption=f"🎬 {title}"
+                    supports_streaming=True,
+                    timeout=120
                 )
 
-        # إرسال الصوت بعد الفيديو تلقائيًا.
-        # يُطبّق هذا السلوك على فيديوهات يوتيوب وتيك توك وفيسبوك.
-        if mode == "video":
-            bot.send_message(
-                chat_id,
-                "🎵 جارٍ استخراج المقطع الصوتي وإرساله..."
-            )
+        bot.send_message(call.message.chat.id, "✅ اكتمل الإرسال.")
 
-            audio_path, audio_title, audio_dir = download_media(
-                url,
-                "audio"
-            )
+    except Exception as exc:
+        logging.exception("فشل التحميل أو الإرسال")
+        bot.send_message(
+            call.message.chat.id,
+            "❌ فشل التحميل أو الإرسال.\n\n"
+            "قد يكون السبب منع الموقع للتنزيل أو عدم دعم الرابط "
+            "أو عدم توفر FFmpeg أو تجاوز حجم الملف.\n\n"
+            f"التفاصيل: {str(exc)[:700]}"
+        )
 
-            try:
-                with open(audio_path, "rb") as audio:
-                    bot.send_audio(
-                        chat_id,
-                        audio,
-                        title=audio_title,
-                        caption="🎵 المقطع الصوتي للفيديو."
-                    )
-            finally:
-                shutil.rmtree(audio_dir, ignore_errors=True)
-
-        bot.delete_message(chat_id, status.message_id)
-
-    except Exception as error:
-        print(f"Download error: {error}")
-
+    finally:
         try:
-            bot.edit_message_text(
-                "❌ تعذر تحميل الملف أو إرساله.\n"
-                "قد يكون الرابط غير متاح، أو الصيغة غير مدعومة، "
-                "أو حجم الملف أكبر من الحد المسموح.\n"
-                "جرّب رابطًا آخر أو اختر جودة أقل.",
-                chat_id,
+            bot.delete_message(
+                call.message.chat.id,
                 status.message_id
             )
         except Exception:
             pass
 
-    finally:
-        if temp_dir:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+        if job_dir:
+            shutil.rmtree(job_dir, ignore_errors=True)
 
-        with downloads_lock:
-            active_downloads.discard(job_key)
+        user_jobs.pop(job_id, None)
 
 
-# ==================================================
-# أمر البداية
-# ==================================================
-
-@bot.message_handler(commands=["start"])
-def send_welcome(message):
-    bot.reply_to(
-        message,
-        "مرحبًا بك في بوت تحميل الفيديو والصوت! 🎬🎵\n\n"
-        "أرسل رابطًا من إحدى المنصات التالية:\n"
-        "• YouTube\n"
-        "• TikTok\n"
-        "• Facebook\n\n"
-        "سأعرض لك خيارات التحميل المتاحة."
+if __name__ == "__main__":
+    logging.info("البوت يعمل الآن...")
+    bot.infinity_polling(
+        skip_pending=True,
+        timeout=30,
+        long_polling_timeout=30
     )
-
-
-# ==================================================
-# استقبال الروابط وعرض الخيارات
-# ==================================================
-
-@bot.message_handler(
-    func=lambda message: bool(message.text)
-    and is_supported_url(message.text)
-)
-def handle_url(message):
-    url = message.text.strip()
-
-    try:
-        bot.send_chat_action(message.chat.id, "typing")
-
-        info = get_video_options(url)
-
-        extractor = (
-            info.get("extractor_key", "")
-            or info.get("extractor", "")
-        ).lower()
-
-        if "youtube" in extractor:
-            platform = "youtube"
-        else:
-            platform = "other"
-
-        formats = info.get("formats", [])
-
-        keyboard = create_keyboard(
-            url,
-            platform,
-            formats
-        )
-
-        title = info.get("title", "الفيديو")
-
-        bot.reply_to(
-            message,
-            f"🎬 <b>{title}</b>\n\n"
-            "اختر ما تريد تحميله:",
-            reply_markup=keyboard,
-            parse_mode="HTML"
-        )
-
-    except Exception as error:
-        print(f"Info error: {error}")
-
-        bot.reply_to(
-            message,
-            "❌ تعذر قراءة الرابط.\n"
-            "تأكد من أن الفيديو متاح وحاول مرة أخرى."
-        )
-
-
-# ==================================================
-# معالجة ضغط الأزرار
-# ==================================================
-
-@bot.callback_query_handler(
-    func=lambda call: call.data and "|" in call.data
-)
-def handle_download_callback(call):
-    try:
-        action, url = call.data.split("|", 1)
-
-        bot.answer_callback_query(
-            call.id,
-            "تم استلام طلبك، جارٍ التجهيز..."
-        )
-
-        if action == "audio":
-            mode = "audio"
-            quality = None
-
-        elif action == "video_best":
-            mode = "video"
-            quality = None
-
-        elif action.startswith("video_"):
-            mode = "video"
-            quality = action.replace("video_", "")
-
-            if quality not in ("1080", "720", "480", "360"):
-                bot.send_message(
-                    call.message.chat.id,
-                    "❌ خيار الجودة غير صالح."
-                )
-                return
-
-        else:
-            return
-
-        # تشغيل التنزيل في مسار منفصل حتى لا تتوقف استجابة البوت.
-        worker = threading.Thread(
-            target=send_download,
-            args=(
-                call.message.chat.id,
-                url,
-                mode,
-                quality
-            ),
-            daemon=True
-        )
-
-        worker.start()
-
-    except Exception as error:
-        print(f"Callback error: {error}")
-
-        try:
-            bot.answer_callback_query(
-                call.id,
-                "حدث خطأ، يرجى المحاولة مجددًا.",
-                show_alert=True
-            )
-        except Exception:
-            pass
-
-
-# ==================================================
-# الرد على الرسائل غير المدعومة
-# ==================================================
-
-@bot.message_handler(func=lambda message: True)
-def default_response(message):
-    bot.reply_to(
-        message,
-        "⚠️ يرجى إرسال رابط صالح من التطبيق الاحمر أو تيك توك أو فيسبوك."
-    )
-
-
-# ==================================================
-# تشغيل البوت
-# ==================================================
-
-print("البوت يعمل الآن وجاهز لاستقبال الروابط...")
-
-bot.infinity_polling(skip_pending=True)
