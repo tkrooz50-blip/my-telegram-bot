@@ -288,4 +288,5 @@ def handle_choice(call):
 
 if __name__ == "__main__":
     logging.info("البوت يعمل الآن...")
+    bot.remove_webhook()
     bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
